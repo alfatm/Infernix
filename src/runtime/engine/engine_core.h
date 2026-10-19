@@ -200,6 +200,17 @@ public:
             return owner->wait_for_request(std::exchange(request_, nullptr), sink, cancellation);
         }
 
+        void await_admission(const CancellationView& cancellation) {
+            if (owner_ == nullptr || request_ == nullptr) {
+                throw std::logic_error("concurrent submission is empty");
+            }
+            if (request_->consumer_mode != OutputConsumerMode::Streaming) {
+                throw std::invalid_argument(
+                    "await_admission requires a stream-consumed submission");
+            }
+            owner_->await_request_admission(request_, cancellation);
+        }
+
     private:
         Submission(EngineCore& owner, std::shared_ptr<Request> request) noexcept
             : owner_(&owner), request_(std::move(request)) {}
@@ -548,6 +559,47 @@ private:
             std::lock_guard lock(request->mutex);
             if (request->error != nullptr) { std::rethrow_exception(request->error); }
             return std::move(request->result);
+        }
+    }
+
+    // A read-only view of the wait_for_request loop's first step: block until this request
+    // crosses the admission boundary (the one that publishes GenerationStart), or is answered
+    // before it. Nothing is consumed — stream_start stays posted for wait_for_request to
+    // deliver. An error answered before admission is rethrown here, and the request's later
+    // wait() rethrows the same exception; a request settled without admission and without an
+    // error (cancelled in the queue) only returns, leaving wait() to deliver its Cancelled
+    // answer. A caller's cancellation request marks the request cancelled and keeps waiting
+    // for the worker's terminal answer, exactly like the wait loop.
+    void await_request_admission(const std::shared_ptr<Request>& request,
+                                 const CancellationView& cancellation) {
+        for (;;) {
+            std::exception_ptr error;
+            bool admitted = false;
+            bool answered = false;
+            {
+                std::unique_lock lock(request->mutex);
+                request->cv.wait_for(lock, std::chrono::milliseconds(10), [&] {
+                    return request->response_done || request->stream_start.has_value();
+                });
+                admitted = request->stream_start.has_value();
+                answered = request->response_done;
+                if (answered && !admitted) { error = request->error; }
+            }
+            if (admitted || answered) {
+                if (error != nullptr) { std::rethrow_exception(error); }
+                return;
+            }
+            bool cancel = false;
+            try {
+                cancel = cancellation.requested();
+            } catch (...) {
+                cancel = true;
+            }
+            if (cancel) {
+                request->cancelled.store(true, std::memory_order_release);
+                request_admission_check();
+                queue_cv_.notify_one();
+            }
         }
     }
 

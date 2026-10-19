@@ -48,6 +48,16 @@ public:
 
     GenerationResult wait(OutputSink* sink = nullptr, const CancellationView& cancellation = {});
 
+    // Blocks until the Engine has admitted this handle's streaming request. Admission publishes
+    // exactly one GenerationStart; this observation leaves that event and every later one to
+    // wait(). A terminal error before the admission boundary (queue timeout, cancellation, an
+    // orderly stop's rejection) is rethrown here with the same exception wait() would surface,
+    // so a serving route can still answer with a plain HTTP status before it commits a
+    // response. A request settled without admission and without error (cancelled while queued)
+    // returns normally; its wait() delivers the terminal answer. Valid only on a handle
+    // submitted in Streaming consumer mode.
+    void await_admission(const CancellationView& cancellation = {});
+
 private:
     class Impl;
     explicit GenerationHandle(std::unique_ptr<Impl> impl) noexcept;

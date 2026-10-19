@@ -158,6 +158,7 @@ public:
     public:
         virtual ~Concept() = default;
         virtual GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) = 0;
+        virtual void await_admission(const CancellationView& cancellation) = 0;
     };
 
     template <class Submission>
@@ -168,6 +169,10 @@ public:
 
         GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) override {
             return submission_.wait(sink, cancellation);
+        }
+
+        void await_admission(const CancellationView& cancellation) override {
+            submission_.await_admission(cancellation);
         }
 
     private:
@@ -183,6 +188,10 @@ public:
 
     GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) {
         return state_->wait(sink, cancellation);
+    }
+
+    void await_admission(const CancellationView& cancellation) {
+        state_->await_admission(cancellation);
     }
 
     [[nodiscard]] const ResolvedSamplingParameters& resolved_sampling() const noexcept {
@@ -212,6 +221,11 @@ GenerationResult GenerationHandle::wait(OutputSink* sink, const CancellationView
     if (impl_ == nullptr) { throw std::logic_error("GenerationHandle is empty"); }
     std::unique_ptr<Impl> impl = std::move(impl_);
     return impl->wait(sink, cancellation);
+}
+
+void GenerationHandle::await_admission(const CancellationView& cancellation) {
+    if (impl_ == nullptr) { throw std::logic_error("GenerationHandle is empty"); }
+    impl_->await_admission(cancellation);
 }
 
 class Engine::Impl {
@@ -529,6 +543,11 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
                 }
                 if (cancellation.requested()) { result.finish_reason = FinishReason::Cancelled; }
                 return std::move(result);
+            }
+
+            void await_admission(const CancellationView&) {
+                // A zero-output submission is answered on the submit call: there is no queue,
+                // no admission boundary, and nothing to wait for; wait() returns its result.
             }
         } immediate{.consumer_mode = consumer_mode};
 

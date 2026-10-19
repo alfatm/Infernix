@@ -1,6 +1,7 @@
 #include "serve/generation_service.h"
 #include "serve/openai_chat.h"
 #include "serve/openai_common.h"
+#include "serve/http_server.h"
 #include "serve/translate.h"
 
 #include <nlohmann/json.hpp>
@@ -1189,6 +1190,39 @@ int test_common_objects() {
         ApiError{.status = 400, .message = "bad", .param = "messages", .code = "invalid"}));
     failures += check(error["error"]["param"] == "messages" && error["error"]["code"] == "invalid",
                       "OpenAI common error shape remains stable");
+
+    // A queue that refused a request answers with a plain, retryable HTTP status: the OpenAI
+    // surface says 503 and carries the Engine's admission window as Retry-After, and the
+    // Anthropic surface keeps its own timeout wording while passing the same hint through.
+    const infernix::RequestError expired(
+        infernix::RequestErrorKind::QueueTimeout,
+        "inference request expired while waiting for admission");
+    const ApiError queue_answer = request_error_to_api_error(expired, {}, {});
+    failures += check(queue_answer.status == 503 && queue_answer.type == "server_error" &&
+                          queue_answer.code == "request_queue_timeout",
+                      "a queue expiry does not map to a retryable server error");
+    {
+        httplib::Response hinted_response;
+        ApiError hinted = queue_answer;
+        hinted.retry_after_seconds = 30;
+        write_openai_error(hinted_response, hinted);
+        failures += check(hinted_response.status == 503 &&
+                              hinted_response.get_header_value("Retry-After") == "30",
+                          "a queue expiry answer carries no usable Retry-After");
+        httplib::Response plain_response;
+        write_openai_error(plain_response, queue_answer);
+        failures += check(!plain_response.has_header("Retry-After"),
+                          "an answer without a hint invented a Retry-After");
+    }
+    {
+        httplib::Response anthropic_response;
+        ApiError hinted = queue_answer;
+        hinted.retry_after_seconds = 30;
+        write_anthropic_error(anthropic_response, hinted, "req_test");
+        failures += check(anthropic_response.status == 504 &&
+                              anthropic_response.get_header_value("Retry-After") == "30",
+                          "the Anthropic surface lost the queue answer's timeout wording or hint");
+    }
     return failures;
 }
 

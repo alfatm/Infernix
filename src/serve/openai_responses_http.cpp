@@ -361,6 +361,25 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         return;
     }
 
+    // A streaming route commits an event stream it can no longer take back; block on the
+    // Engine's admission boundary first, so the queue's own answer (expired, cancelled while
+    // queued, a stopping engine) still reaches the client as a plain HTTP status, exactly like
+    // the non-streaming branch answers it. Only after admission are the remaining failures
+    // mid-generation ones, where the stream is the right envelope.
+    try {
+        service_->admit(prepared, [&req] { return client_disconnected(req); });
+    } catch (const ApiException& exception) {
+        const ApiError error = responses_error(exception.error());
+        lifecycle->failure(make_generation_request_failure(error));
+        write_openai_error(res, error);
+        return;
+    } catch (const std::exception& exception) {
+        lifecycle->failure(
+            make_internal_request_failure(RequestFailurePhase::Generation, exception.what()));
+        write_openai_error(res, internal_error(exception));
+        return;
+    }
+
     try {
         auto stream                      = std::make_shared<StreamingResponse>();
         stream->prepared                 = std::move(prepared);

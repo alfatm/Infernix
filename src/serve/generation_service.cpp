@@ -511,6 +511,20 @@ int GenerationService::count_prompt_tokens(const GenerationRequest& request,
     }
 }
 
+void GenerationService::throw_request_answer(
+    const infernix::RequestError& exception, std::string_view constraint_param,
+    const std::vector<std::string>& tool_schema_params) const {
+    ApiError error =
+        request_error_to_api_error(exception, constraint_param, tool_schema_params);
+    // The Engine's own admission window is the only honest hint for when trying again can
+    // mean something else than the same expiry; every earlier answer repeats the queue.
+    if (error.status == 503 || error.status == 429) {
+        error.retry_after_seconds = static_cast<int>(
+            std::max<std::uint64_t>(1, (options_.pending_timeout_ms + 999U) / 1000U));
+    }
+    throw ApiException(std::move(error));
+}
+
 GenerationOutcome GenerationService::run(PreparedRequest& prepared, const StreamSink* sink,
                                          std::function<bool()> is_cancelled) {
     std::unique_ptr<ServiceOutputSink> output_sink;
@@ -529,7 +543,7 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     try {
         result = prepared.generation.wait(public_sink, cancellation);
     } catch (const infernix::RequestError& exception) {
-        throw_request_error(exception, prepared.constraint_param, prepared.tool_schema_params);
+        throw_request_answer(exception, prepared.constraint_param, prepared.tool_schema_params);
     }
     GenerationOutcome outcome;
     outcome.text                = std::move(result.content);
@@ -596,6 +610,16 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.tool_calls      = std::move(result.tool_calls);
     outcome.tool_call_parse = result.tool_call_parse;
     return outcome;
+}
+
+void GenerationService::admit(PreparedRequest& prepared, std::function<bool()> is_cancelled) const {
+    infernix::CancellationView cancellation;
+    if (is_cancelled) { cancellation = infernix::CancellationView(std::move(is_cancelled)); }
+    try {
+        prepared.generation.await_admission(cancellation);
+    } catch (const infernix::RequestError& exception) {
+        throw_request_answer(exception, prepared.constraint_param, prepared.tool_schema_params);
+    }
 }
 
 void GenerationService::warmup() {

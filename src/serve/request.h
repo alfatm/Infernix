@@ -32,6 +32,8 @@ struct ApiError {
     std::string code;  // optional
     // A context overflow's counts, so each protocol can word it as its clients detect it.
     std::optional<ContextLengthDetails> context_length;
+    // 0 sends no header; a queue-pressure answer carries the server's admission window.
+    int retry_after_seconds = 0;
 };
 
 class ApiException : public std::runtime_error {

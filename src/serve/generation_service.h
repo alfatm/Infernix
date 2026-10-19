@@ -183,6 +183,15 @@ public:
     GenerationOutcome run(PreparedRequest& prepared, const StreamSink* sink,
                           std::function<bool()> is_cancelled = {});
 
+    // Blocks a streaming route before it commits an SSE response until the Engine has admitted
+    // the request: after admission the only failures left are mid-generation ones, which belong
+    // in the stream. The queue's own failures (expired, cancelled at the queue, stopped engine)
+    // surface here as the ApiException a plain HTTP status still carries, so a route can answer
+    // 503/429 before any response byte is written. Errors answered before admission are the same
+    // exceptions wait() rethrows later; a request settled without admission and without an error
+    // returns and its run() delivers the Cancelled outcome as usual.
+    void admit(PreparedRequest& prepared, std::function<bool()> is_cancelled = {}) const;
+
     void warmup();
 
     // Begins the Engine's orderly stop: running and queued generations fail as Unavailable.
@@ -209,6 +218,14 @@ private:
     [[nodiscard]] std::shared_ptr<RequestLifetime>
     acquire_lifetime(const std::shared_ptr<RequestCapacity>& capacity,
                      DeadlinePolicy deadline_policy, const char* full_message) const;
+
+    // The protocol mapping of a RequestError, shared by run() and admit(): a queue-pressure
+    // answer (the admission window expired, the queue is full, the engine is stopping) also
+    // carries the server's own pending window as Retry-After — streaming and non-streaming
+    // answers to the same condition stay identical.
+    [[noreturn]] void throw_request_answer(
+        const infernix::RequestError& exception, std::string_view constraint_param,
+        const std::vector<std::string>& tool_schema_params) const;
 
     ServeOptions options_;
     std::unique_ptr<infernix::Engine> engine_;

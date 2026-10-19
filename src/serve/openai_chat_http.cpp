@@ -111,6 +111,28 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         return;
     }
 
+    // A streaming route commits an SSE response it can no longer take back; block on the
+    // Engine's admission boundary first, so the queue's own answer (expired, cancelled while
+    // queued, a stopping engine) still reaches the client as a plain HTTP status, exactly like
+    // the non-streaming branch answers it. Only after admission are the remaining failures
+    // mid-generation ones, where the stream is the right envelope.
+    try {
+        service_->admit(prepared, [&req] { return client_disconnected(req); });
+    } catch (const ApiException& exception) {
+        lifecycle->failure(make_generation_request_failure(exception.error()));
+        write_openai_error(res, exception.error());
+        return;
+    } catch (const std::exception& exception) {
+        lifecycle->failure(
+            make_internal_request_failure(RequestFailurePhase::Generation, exception.what()));
+        ApiError error;
+        error.status  = 500;
+        error.type    = "internal_error";
+        error.message = exception.what();
+        write_openai_error(res, error);
+        return;
+    }
+
     try {
         const bool return_progress   = request.return_progress;
         const bool timings_per_token = request.timings_per_token;

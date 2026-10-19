@@ -117,6 +117,9 @@ std::string response_request_id(const httplib::Response& response) {
 
 void write_openai_error(httplib::Response& response, const ApiError& error) {
     response.status = error.status;
+    if (error.retry_after_seconds > 0) {
+        response.set_header("Retry-After", std::to_string(error.retry_after_seconds));
+    }
     response.set_content(make_error_body(error), "application/json");
 }
 
@@ -126,6 +129,9 @@ void write_anthropic_error(httplib::Response& response, const ApiError& api_erro
     response.status      = error.status;
     response.headers.erase("request-id");
     response.set_header("request-id", request_id);
+    if (error.retry_after_seconds > 0) {
+        response.set_header("Retry-After", std::to_string(error.retry_after_seconds));
+    }
     response.set_content(make_anthropic_error_body(error, request_id), "application/json");
 }
 

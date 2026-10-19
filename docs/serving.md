@@ -112,15 +112,17 @@ How failures end:
 Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
 error responses. Anthropic endpoints use their separate `request-id` contract.
 
-All three generation SSE endpoints emit the standard `: keep-alive` comment after five seconds
-without a protocol event. The comment is transport-only: SSE clients ignore it, and it does not
-change generated text, event ordering, usage, stored Responses, or request logs. Accepted
-connections also use TCP keepalive and a 15-second retransmission limit (`TCP_USER_TIMEOUT` on
-Linux, `TCP_MAXRTMS` on Windows); together with the heartbeat,
-a dead or unacknowledging peer is normally cancelled within about 20 seconds, including while the
-request is waiting or prefilling. A peer whose TCP stack remains connected and acknowledges data
-cannot be distinguished from a reading application; proxies must close their upstream Infernix
-connection when the downstream client disappears.
+A generation SSE endpoint commits its response only once the Engine has admitted the request:
+while a request is still queued, the client sees no response bytes at all, and the queue's own
+refusal answers as a plain HTTP status ([Execution behavior](#execution-behavior)). A started
+stream then emits the standard `: keep-alive` comment after five seconds without a protocol
+event. The comment is transport-only: SSE clients ignore it, and it does not change generated
+text, event ordering, usage, stored Responses, or request logs. Accepted connections also use
+TCP keepalive and a 15-second retransmission limit (`TCP_USER_TIMEOUT` on Linux, `TCP_MAXRTMS`
+on Windows); together with the heartbeat, a dead or unacknowledging peer is normally cancelled
+within about 20 seconds, including while the request is prefilling. A peer whose TCP stack
+remains connected and acknowledges data cannot be distinguished from a reading application;
+proxies must close their upstream Infernix connection when the downstream client disappears.
 
 ## Models
 
@@ -507,7 +509,9 @@ supported.
 
 A failure after the stream has started is sent as OpenAI does: one unnamed `data:` event whose
 payload is the usual error body (`{"error": {...}}`, which OpenAI SDKs raise as an API error), then
-the connection closes without a finish-reason chunk, usage chunk or `[DONE]`.
+the connection closes without a finish-reason chunk, usage chunk or `[DONE]`. A stream that started
+carries only mid-generation failures: the response begins at Engine admission, so the queue's own
+refusals (expiry, overload, a stopping engine) answer as plain HTTP statuses on every route.
 
 ### llama.cpp-compatible request observations
 
@@ -1723,10 +1727,12 @@ capacity returns HTTP 429 with code `server_overloaded`. Token-count requests (A
 capacity of the same size bounds how many run at once, and beyond it they are rejected as
 overloaded, as generation requests are. The absolute
 `--pending-timeout-ms` deadline starts before preparation, covers media acquisition and Engine FIFO
-waiting, and returns HTTP 503 with code `request_queue_timeout` if admission does not occur in time.
-Once admitted, a request may pause for resource pressure without restarting this initial-admission
-deadline. Fresh requests enter in FIFO order with a bounded bypass allowance when an earlier request
-cannot fit. There is no admission ETA or unbounded overflow queue.
+waiting, and returns HTTP 503 with code `request_queue_timeout` and a `Retry-After` set to the
+deadline window if admission does not occur in time — on streaming routes as a plain status too,
+because their response is committed only at admission. Once admitted, a request may pause for
+resource pressure without restarting this initial-admission deadline. Fresh requests enter in FIFO
+order with a bounded bypass allowance when an earlier request cannot fit. There is no admission
+ETA or unbounded overflow queue.
 
 Input memory is bounded by the outstanding-request count and the per-request
 `--max-request-mib` limit. Media preparation uses a shared permit pool sized from `--media-live-mib`
